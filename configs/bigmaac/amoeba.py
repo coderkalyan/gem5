@@ -21,12 +21,16 @@ system.mem_ranges = [AddrRange("512MB")]
 system.membus = SystemXBar()
 
 system.cpu = X86TimingSimpleCPU()
-system.cpu.icache = L1Cache()
-system.cpu.icache.mem_side = system.membus.cpu_side_ports
-system.cpu.icache.cpu_side = system.cpu.icache_port
-system.cpu.dcache = L1Cache()
-system.cpu.dcache.mem_side = system.membus.cpu_side_ports
-system.cpu.dcache.cpu_side = system.cpu.dcache_port
+system.amoeba = AmoebaCache()
+system.cpu.icache_port = system.amoeba.inst_port
+system.cpu.dcache_port = system.amoeba.data_port
+system.amoeba.mem_side = system.membus.cpu_side_ports
+# system.cpu.icache = L1Cache()
+# system.cpu.icache.mem_side = system.membus.cpu_side_ports
+# system.cpu.icache.cpu_side = system.cpu.icache_port
+# system.cpu.dcache = L1Cache()
+# system.cpu.dcache.mem_side = system.membus.cpu_side_ports
+# system.cpu.dcache.cpu_side = system.cpu.dcache_port
 system.cpu.createInterruptController()
 system.cpu.interrupts[0].pio = system.membus.mem_side_ports
 system.cpu.interrupts[0].int_requestor = system.membus.cpu_side_ports

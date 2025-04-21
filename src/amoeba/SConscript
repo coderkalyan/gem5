@@ -1,0 +1,6 @@
+Import('*')
+
+SimObject('AmoebaCache.py', sim_objects=['AmoebaCache'])
+Source('amoeba_cache.cc')
+
+DebugFlag('AmoebaCache', "Amoeba Cache for BIGMAAC")
