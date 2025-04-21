@@ -6,7 +6,7 @@ from m5.objects.ClockedObject import ClockedObject
 class AmoebaCache(ClockedObject):
     type = "AmoebaCache"
     cxx_header = "amoeba/amoeba_cache.hh"
-    cxx_class = "AmoebaCache";
+    cxx_class = "gem5::AmoebaCache";
 
     cpu_side = VectorResponsePort("CPU side port, receives requests")
     mem_side = RequestPort("Memory side port, sends requests")
