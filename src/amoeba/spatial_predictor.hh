@@ -24,16 +24,16 @@ class SpatialPatternPredictor
                     int default_left, int default_right);
 
     // Predict bit vector of expected subblock accesses
-    std::vector<bool> predictPattern(Addr pc, int offset);
+    std::vector<bool> predictPattern(Addr address, int offset);
 
     // Predict left/right spatial range around subblock
-    DirectionalPrediction predictWidth(Addr pc, int offset, int subblock);
+    DirectionalPrediction predictWidth(Addr address, int offset, int subblock);
 
     // Update subblock access in current CPT entry
-    void updateCurrentPredictionTable(Addr pc, int offset, int subblock);
+    void updateCurrentPredictionTable(Addr address, int offset, int subblock);
 
     // Commit CPT entry to global PHT
-    void updatePredictionHistoryTable(Addr pc, int offset);
+    void updatePredictionHistoryTable(Addr address, int offset);
 
   private:
     struct PHTEntry {
@@ -47,7 +47,7 @@ class SpatialPatternPredictor
         bool valid;
     };
 
-    int computeIndex(Addr pc, Addr offset) const;
+    int computeIndex(Addr address, Addr offset) const;
     PHTEntry makeEmptyPattern() const;
 
     int phtSize;
@@ -56,6 +56,10 @@ class SpatialPatternPredictor
 
     int defaultLeftWidth = 0;
     int defaultRightWidth = 0;
+
+    bool basic_prediction = true;
+    bool two_consecutive_misses = false;
+    bool confidence_interval = false;
 
     std::vector<PHTEntry> pht;
     std::unordered_map<uint64_t, CPTEntry> cpt;
