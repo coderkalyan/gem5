@@ -13,4 +13,6 @@ class AmoebaCache(ClockedObject):
 
     latency = Param.Cycles(1, "Cycles taken on a hit or to resolve a miss")
     size = Param.MemorySize('64kB', "Cache size")
+    sets = Param.Unsigned(256, "Number of sets")
+    rmax = Param.Unsigned(8, "Maximum block size in words")
     system = Param.System(Parent.any, "The system this cache is part of")

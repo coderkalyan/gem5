@@ -26,8 +26,9 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "amoeba/amoeba_cache.hh"
+#include <cmath>
 
+#include "amoeba/amoeba_cache.hh"
 #include "base/compiler.hh"
 #include "debug/AmoebaCache.hh"
 #include "sim/system.hh"
@@ -35,11 +36,10 @@
 namespace gem5 {
 
 AmoebaCache::AmoebaCache(const AmoebaCacheParams &params)
-    : ClockedObject(params), latency(params.latency),
-      blockSize(params.system->cacheLineSize()),
-      capacity(params.size / blockSize),
-      memPort(params.name + ".mem_side", this), blocked(false),
-      originalPacket(nullptr), waitingPortId(-1), stats(this) {
+    : ClockedObject(params), latency(params.latency), sets(params.sets),
+      rmax(params.rmax), memPort(params.name + ".mem_side", this),
+      blocked(false), originalPacket(nullptr), waitingPortId(-1), store(sets),
+      stats(this) {
     // Since the CPU side ports are a vector of ports, create an instance of
     // the CPUSidePort for each connection. This member of params is
     // automatically created depending on the name of the vector port and
@@ -190,6 +190,7 @@ bool AmoebaCache::handleRequest(PacketPtr pkt, int port_id) {
 bool AmoebaCache::handleResponse(PacketPtr pkt) {
     assert(blocked);
     DPRINTF(AmoebaCache, "Got response for addr %#x\n", pkt->getAddr());
+    DDUMP(AmoebaCache, pkt->getConstPtr<uint8_t>(), pkt->getSize());
 
     // For now assume that inserts are off of the critical path and don't count
     // for any added latency.
@@ -199,17 +200,44 @@ bool AmoebaCache::handleResponse(PacketPtr pkt) {
 
     // If we had to upgrade the request packet to a full cache line, now we
     // can use that packet to construct the response.
-    if (originalPacket != nullptr) {
-        DPRINTF(AmoebaCache, "Copying data from new packet to old\n");
-        // We had to upgrade a previous packet. We can functionally deal with
-        // the cache access now. It better be a hit.
-        [[maybe_unused]] bool hit = accessFunctional(originalPacket);
-        panic_if(!hit, "Should always hit after inserting");
-        originalPacket->makeResponse();
-        delete pkt; // We may need to delay this, I'm not sure.
-        pkt = originalPacket;
-        originalPacket = nullptr;
-    } // else, pkt contains the data it needs
+    // if (originalPacket != nullptr) {
+    //     DPRINTF(AmoebaCache, "Copying data from new packet to old\n");
+    //     // We had to upgrade a previous packet. We can functionally deal with
+    //     // the cache access now. It better be a hit.
+    //     [[maybe_unused]] bool hit = accessFunctional(originalPacket);
+    //     if (!hit) {
+    //         const Addr packetAddr = originalPacket->getAddr();
+    //         const uint64_t wordOffset = (packetAddr >> 3) & (rmax - 1);
+    //         const uint64_t setIndex =
+    //             ((uint64_t)packetAddr >> (uint64_t)std::log2(8 * rmax)) &
+    //             (8 * rmax - 1);
+    //         const uint64_t regionTag =
+    //             ((uint64_t)packetAddr >> (uint64_t)std::log2(8 * rmax *
+    //             sets)) & (8 * rmax * sets - 1);
+    //
+    //         DPRINTF(AmoebaCache,
+    //                 "response: packetAddr = %lx, size = %lu, wordOffset =
+    //                 %lx, " "setIndex = "
+    //                 "%lx, regionTag "
+    //                 "= %lx\n",
+    //                 packetAddr, originalPacket->getSize(), wordOffset,
+    //                 setIndex, regionTag);
+    //
+    //         auto &block = store[setIndex].back();
+    //         DPRINTF(AmoebaCache,
+    //                 "last block in set: setIndex = %lx, regionTag = %lx,
+    //                 start "
+    //                 "= %lx, end = "
+    //                 "%lx\n",
+    //                 setIndex, block.regionTag, block.start, block.end);
+    //     }
+    //
+    //     panic_if(!hit, "Should always hit after inserting");
+    //     originalPacket->makeResponse();
+    //     delete pkt; // We may need to delay this, I'm not sure.
+    //     pkt = originalPacket;
+    //     originalPacket = nullptr;
+    // } // else, pkt contains the data it needs
 
     sendResponse(pkt);
 
@@ -219,6 +247,7 @@ bool AmoebaCache::handleResponse(PacketPtr pkt) {
 void AmoebaCache::sendResponse(PacketPtr pkt) {
     assert(blocked);
     DPRINTF(AmoebaCache, "Sending resp for addr %#x\n", pkt->getAddr());
+    DDUMP(AmoebaCache, pkt->getConstPtr<uint8_t>(), pkt->getSize());
 
     int port = waitingPortId;
 
@@ -263,111 +292,106 @@ void AmoebaCache::accessTiming(PacketPtr pkt) {
         stats.misses++; // update stats
         missTime = curTick();
         // Forward to the memory side.
-        // We can't directly forward the packet unless it is exactly the size
-        // of the cache line, and aligned. Check for that here.
-        Addr addr = pkt->getAddr();
-        Addr block_addr = pkt->getBlockAddr(blockSize);
-        unsigned size = pkt->getSize();
-        if (addr == block_addr && size == blockSize) {
-            // Aligned and block size. We can just forward.
-            DPRINTF(AmoebaCache, "forwarding packet\n");
-            memPort.sendPacket(pkt);
-        } else {
-            DPRINTF(AmoebaCache, "Upgrading packet to block size\n");
-            panic_if(addr - block_addr + size > blockSize,
-                     "Cannot handle accesses that span multiple cache lines");
-            // Unaligned access to one cache block
-            assert(pkt->needsResponse());
-            MemCmd cmd;
-            if (pkt->isWrite() || pkt->isRead()) {
-                // Read the data from memory to write into the block.
-                // We'll write the data in the cache (i.e., a writeback cache)
-                cmd = MemCmd::ReadReq;
-            } else {
-                panic("Unknown packet type in upgrade size");
-            }
+        memPort.sendPacket(pkt);
 
-            // Create a new packet that is blockSize
-            PacketPtr new_pkt = new Packet(pkt->req, cmd, blockSize);
-            new_pkt->allocate();
-
-            // Should now be block aligned
-            assert(new_pkt->getAddr() == new_pkt->getBlockAddr(blockSize));
-
-            // Save the old packet
-            originalPacket = pkt;
-
-            DPRINTF(AmoebaCache, "forwarding packet\n");
-            memPort.sendPacket(new_pkt);
-        }
+        // FIXME: implement a spatial size predictor
+        // Addr addr = pkt->getAddr();
+        // auto blockSize = pkt->getSize();
+        // Addr block_addr = pkt->getAddr();
+        // unsigned size = pkt->getSize();
+        // if (addr == block_addr && size == blockSize) {
+        //     // Aligned and block size. We can just forward.
+        //     DPRINTF(AmoebaCache, "forwarding packet\n");
+        //     memPort.sendPacket(pkt);
+        // } else {
+        //     DPRINTF(AmoebaCache, "Upgrading packet to block size\n");
+        //     panic_if(addr - block_addr + size > blockSize,
+        //              "Cannot handle accesses that span multiple cache
+        //              lines");
+        //     // Unaligned access to one cache block
+        //     assert(pkt->needsResponse());
+        //     MemCmd cmd;
+        //     if (pkt->isWrite() || pkt->isRead()) {
+        //         // Read the data from memory to write into the block.
+        //         // We'll write the data in the cache (i.e., a writeback
+        //         cache) cmd = MemCmd::ReadReq;
+        //     } else {
+        //         panic("Unknown packet type in upgrade size");
+        //     }
+        //
+        //     // Create a new packet that is blockSize
+        //     PacketPtr new_pkt = new Packet(pkt->req, cmd, blockSize);
+        //     new_pkt->allocate();
+        //
+        //     // Should now be block aligned
+        //     assert(new_pkt->getAddr() == new_pkt->getBlockAddr(blockSize));
+        //
+        //     // Save the old packet
+        //     originalPacket = pkt;
+        //
+        //     DPRINTF(AmoebaCache, "forwarding packet\n");
+        //     memPort.sendPacket(new_pkt);
+        // }
     }
 }
 
 bool AmoebaCache::accessFunctional(PacketPtr pkt) {
-    Addr block_addr = pkt->getBlockAddr(blockSize);
-    auto it = cacheStore.find(block_addr);
-    if (it != cacheStore.end()) {
+    const Addr packetAddr = pkt->getAddr();
+    const uint64_t granularity = 8 * rmax;
+    const uint64_t setIndex =
+        ((uint64_t)packetAddr >> (uint64_t)std::log2(granularity)) &
+        (granularity - 1);
+
+    for (auto &block : store[setIndex]) {
+        // check if the block region tag and word offset match
+        if (packetAddr < block.start)
+            continue;
+        if ((packetAddr + pkt->getSize() - 1) > block.end)
+            continue;
+
+        // hit, so potentially read or write from the packet
         if (pkt->isWrite()) {
-            // Write the data into the block in the cache
-            pkt->writeDataToBlock(it->second, blockSize);
+            pkt->writeData(&block.data[packetAddr - block.start]);
         } else if (pkt->isRead()) {
-            // Read the data out of the cache block into the packet
-            pkt->setDataFromBlock(it->second, blockSize);
+            // read the data out of the cache block into the packet
+            pkt->setData(&block.data[packetAddr - block.start]);
         } else {
             panic("Unknown packet type!");
         }
+
         return true;
     }
+
     return false;
 }
 
 void AmoebaCache::insert(PacketPtr pkt) {
-    // The packet should be aligned.
-    assert(pkt->getAddr() == pkt->getBlockAddr(blockSize));
     // The address should not be in the cache
-    assert(cacheStore.find(pkt->getAddr()) == cacheStore.end());
+    assert(!accessFunctional(pkt));
     // The pkt should be a response
     assert(pkt->isResponse());
 
-    if (cacheStore.size() >= capacity) {
-        // Select random thing to evict. This is a little convoluted since we
-        // are using a std::unordered_map. See http://bit.ly/2hrnLP2
-        int bucket, bucket_size;
-        do {
-            bucket = rng->random(0, (int)cacheStore.bucket_count() - 1);
-        } while ((bucket_size = cacheStore.bucket_size(bucket)) == 0);
-        auto block = std::next(cacheStore.begin(bucket),
-                               rng->random(0, bucket_size - 1));
-
-        DPRINTF(AmoebaCache, "Removing addr %#x\n", block->first);
-
-        // Write back the data.
-        // Create a new request-packet pair
-        RequestPtr req =
-            std::make_shared<Request>(block->first, blockSize, 0, 0);
-
-        PacketPtr new_pkt = new Packet(req, MemCmd::WritebackDirty, blockSize);
-        new_pkt->dataDynamic(block->second); // This will be deleted later
-
-        DPRINTF(AmoebaCache, "Writing packet back %s\n", pkt->print());
-        // Send the write to memory
-        memPort.sendPacket(new_pkt);
-
-        // Delete this entry
-        cacheStore.erase(block->first);
-    }
+    // FIXME: implement eviction
 
     DPRINTF(AmoebaCache, "Inserting %s\n", pkt->print());
-    DDUMP(AmoebaCache, pkt->getConstPtr<uint8_t>(), blockSize);
-
-    // Allocate space for the cache block data
-    uint8_t *data = new uint8_t[blockSize];
+    DDUMP(AmoebaCache, pkt->getConstPtr<uint8_t>(), pkt->getSize());
 
     // Insert the data and address into the cache store
-    cacheStore[pkt->getAddr()] = data;
+    const Addr packetAddr = pkt->getAddr();
+    const uint64_t granularity = 8 * rmax;
+    const uint64_t setIndex =
+        ((uint64_t)packetAddr >> (uint64_t)std::log2(granularity)) &
+        (granularity - 1);
+
+    // FIXME: word offset wrong when using spatial prefetching
+    DPRINTF(AmoebaCache, "Inserting: setIndex = %lx, start = %lx, size = %lx\n",
+            setIndex, packetAddr, pkt->getSize());
+
+    store[setIndex].push_back(Block(packetAddr, pkt->getSize()));
 
     // Write the data into the cache
-    pkt->writeDataToBlock(data, blockSize);
+    // FIXME: write pointer wrong when using spatial prefetching
+    pkt->writeData(store[setIndex].back().data);
 }
 
 AddrRangeList AmoebaCache::getAddrRanges() const {

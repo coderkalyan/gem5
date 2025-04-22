@@ -185,6 +185,22 @@ class AmoebaCache : public ClockedObject {
         void recvRangeChange() override;
     };
 
+    struct Block {
+        // first address in the block
+        Addr start;
+        // last address in the block (inclusive)
+        Addr end;
+        uint8_t *data;
+
+        Block(Addr start, unsigned size) : start(start), end(start + size - 1) {
+            data = new uint8_t[size];
+        }
+
+        ~Block() {
+            // delete[] data;
+        }
+    };
+
     /**
      * Handle the request from the CPU side. Called from the CPU port
      * on a timing request.
@@ -262,11 +278,11 @@ class AmoebaCache : public ClockedObject {
     /// Latency to check the cache. Number of cycles for both hit and miss
     const Cycles latency;
 
-    /// The block size for the cache
-    const Addr blockSize;
+    /// The number of sets in the cache.
+    const unsigned sets;
 
-    /// Number of blocks in the cache (size of cache / block size)
-    const unsigned capacity;
+    /// RMAX, the maximum size of each dynamic block.
+    const Addr rmax;
 
     /// Instantiation of the CPU-side port
     std::vector<CPUSidePort> cpuPorts;
@@ -287,8 +303,11 @@ class AmoebaCache : public ClockedObject {
     /// For tracking the miss latency
     Tick missTime;
 
-    /// An incredibly simple cache storage. Maps block addresses to data
-    std::unordered_map<Addr, uint8_t *> cacheStore;
+    /// Amoeba cache backing store, consisting of a fixed data
+    /// array (which collocates tags) of N sets.
+    /// Currently not optimized either for hardware accuracy or
+    /// performance, just ease of prototyping.
+    std::vector<std::vector<Block>> store;
 
     Random::RandomPtr rng = Random::genRandom();
 
