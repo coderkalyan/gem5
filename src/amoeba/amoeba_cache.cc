@@ -37,9 +37,9 @@ namespace gem5 {
 
 AmoebaCache::AmoebaCache(const AmoebaCacheParams &params)
     : ClockedObject(params), latency(params.latency), sets(params.sets),
-      rmax(params.rmax), memPort(params.name + ".mem_side", this),
-      blocked(false), originalPacket(nullptr), waitingPortId(-1), store(sets),
-      stats(this) {
+      rmax(params.rmax), size(params.size),
+      memPort(params.name + ".mem_side", this), blocked(false),
+      originalPacket(nullptr), waitingPortId(-1), store(sets), stats(this) {
     // Since the CPU side ports are a vector of ports, create an instance of
     // the CPUSidePort for each connection. This member of params is
     // automatically created depending on the name of the vector port and
@@ -371,18 +371,43 @@ void AmoebaCache::insert(PacketPtr pkt) {
     // The pkt should be a response
     assert(pkt->isResponse());
 
-    // FIXME: implement eviction
-
-    DPRINTF(AmoebaCache, "Inserting %s\n", pkt->print());
-    DDUMP(AmoebaCache, pkt->getConstPtr<uint8_t>(), pkt->getSize());
-
-    // Insert the data and address into the cache store
     const Addr packetAddr = pkt->getAddr();
     const uint64_t granularity = 8 * rmax;
     const uint64_t setIndex =
         ((uint64_t)packetAddr >> (uint64_t)std::log2(granularity)) &
         (granularity - 1);
 
+    // FIXME: implement eviction
+    int setSize = 0;
+    for (const auto &block : store[setIndex]) {
+        setSize += block.end - block.start + 1;
+        setSize += 8; // 1 word tag overhead
+    }
+
+    const auto maxSize = size / sets;
+    while ((maxSize - setSize) < pkt->getSize()) {
+        const auto &block = store[setIndex].begin();
+        const auto blockSize = block->end - block->start + 1;
+        // Write back the data.
+        // Create a new request-packet pair
+        RequestPtr req =
+            std::make_shared<Request>(block->start, blockSize, 0, 0);
+
+        PacketPtr new_pkt = new Packet(req, MemCmd::WritebackDirty, blockSize);
+        new_pkt->dataDynamic(block->data); // This will be deleted later
+
+        DPRINTF(AmoebaCache, "Writing packet back %s\n", new_pkt->print());
+        // Send the write to memory
+        memPort.sendPacket(new_pkt);
+
+        setSize -= blockSize;
+        store[setIndex].erase(block);
+    }
+
+    DPRINTF(AmoebaCache, "Inserting %s\n", pkt->print());
+    DDUMP(AmoebaCache, pkt->getConstPtr<uint8_t>(), pkt->getSize());
+
+    // Insert the data and address into the cache store
     // FIXME: word offset wrong when using spatial prefetching
     DPRINTF(AmoebaCache, "Inserting: setIndex = %lx, start = %lx, size = %lx\n",
             setIndex, packetAddr, pkt->getSize());

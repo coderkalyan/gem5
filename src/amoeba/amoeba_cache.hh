@@ -284,6 +284,8 @@ class AmoebaCache : public ClockedObject {
     /// RMAX, the maximum size of each dynamic block.
     const Addr rmax;
 
+    const unsigned size;
+
     /// Instantiation of the CPU-side port
     std::vector<CPUSidePort> cpuPorts;
 
