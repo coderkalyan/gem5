@@ -12,6 +12,12 @@ class L1Cache(Cache):
     size = "64kB"
 
 
+class Slapp(SlappCache):
+    latency = 1
+    sets = 256
+    associativity = 4
+    capacity = "64kB"
+
 system = System()
 system.clk_domain = SrcClockDomain()
 system.clk_domain.clock = "1GHz"
@@ -21,15 +27,15 @@ system.mem_ranges = [AddrRange("512MB")]
 system.membus = SystemXBar()
 
 system.cpu = X86TimingSimpleCPU()
-system.amoeba = AmoebaCache()
-system.amoeba.mem_side = system.membus.cpu_side_ports
-# system.cpu.icache_port = system.amoeba.inst_port
-# system.cpu.dcache_port = system.amoeba.data_port
-# system.amoeba.mem_side = system.membus.cpu_side_ports
+system.slapp = SlappCache()
+system.slapp.mem_side = system.membus.cpu_side_ports
+# system.cpu.icache_port = system.slapp.inst_port
+# system.cpu.dcache_port = system.slapp.data_port
+# system.slapp.mem_side = system.membus.cpu_side_ports
 system.cpu.icache = L1Cache()
 system.cpu.icache.mem_side = system.membus.cpu_side_ports
 system.cpu.icache.cpu_side = system.cpu.icache_port
-system.cpu.dcache_port = system.amoeba.cpu_side
+system.cpu.dcache_port = system.slapp.cpu_side
 # system.cpu.dcache = L1Cache()
 # system.cpu.dcache.mem_side = system.membus.cpu_side_ports
 # system.cpu.dcache.cpu_side = system.cpu.dcache_port

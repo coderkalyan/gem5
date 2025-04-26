@@ -1,0 +1,6 @@
+Import('*')
+
+SimObject('SlappCache.py', sim_objects=['SlappCache'])
+Source('slapp_cache.cc')
+
+DebugFlag('SlappCache', "Amoeba Cache for SLAPP")
