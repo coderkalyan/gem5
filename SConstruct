@@ -794,14 +794,6 @@ for variant_path in variant_paths:
                 [None, 'socket'], 'sys/socket.h', 'C++', 'accept(0,0,0);'):
            error("Can't find library with socket calls (e.g. accept()).")
 
-        if not conf.CheckLib('z'):
-            print("couldn't find zlib")
-        else:
-            print("found zlib!")
-        if not conf.CheckHeader('zlib.'):
-            print("couldn't find zlib header")
-        else:
-            print("found zlib header!")
         if not conf.CheckLibWithHeader('z', 'zlib.h', 'C++'):
             error('Did not find needed zlib compression library '
                   'and/or zlib.h header file.\n'
