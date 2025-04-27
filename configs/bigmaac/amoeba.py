@@ -28,7 +28,7 @@ system.membus = SystemXBar()
 
 # system.cpu = X86TimingSimpleCPU()
 system.cpu = X86O3CPU()
-system.slapp = L1Cache() # SlappCache()
+system.slapp = SlappCache()
 system.slapp.mem_side = system.membus.cpu_side_ports
 # system.cpu.icache_port = system.slapp.inst_port
 # system.cpu.dcache_port = system.slapp.data_port
@@ -52,8 +52,8 @@ system.mem_ctrl.dram = DDR3_1600_8x8()
 system.mem_ctrl.dram.range = system.mem_ranges[0]
 system.mem_ctrl.port = system.membus.mem_side_ports
 
-# binary = "tests/test-progs/hello/bin/x86/linux/hello"
-binary = "tests/test-progs/slapp/soa/aos"
+binary = "tests/test-progs/hello/bin/x86/linux/hello"
+# binary = "tests/test-progs/slapp/soa/aos"
 # binary = "/usr/bin/python3"
 # script = "tests/test-progs/python/hello.py"
 system.workload = SEWorkload.init_compatible(binary)

@@ -250,7 +250,8 @@ private:
    */
   bool accessFunctional(PacketPtr pkt);
 
-  void evict(const uint64_t set_index, const uint64_t target);
+  void evict(const uint64_t set_index, const uint64_t target,
+             const bool write_back);
 
   /**
    * Insert a block into the cache. If there is no room left in the cache,
@@ -311,6 +312,8 @@ private:
   std::vector<uint8_t> heap;
   /// Write pointer to end of heap.
   size_t writePointer;
+
+  std::unordered_map<uint64_t, uint8_t> present;
 
   Random::RandomPtr rng = Random::genRandom();
 

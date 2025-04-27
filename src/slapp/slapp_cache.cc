@@ -200,7 +200,34 @@ bool SlappCache::handleResponse(PacketPtr pkt) {
 
   // For now assume that inserts are off of the critical path and don't count
   // for any added latency.
-  insert(pkt);
+  if (present.size() > 0) {
+    // partial miss response, stitch together
+    auto start = (uint64_t)(pkt->getAddr());
+    auto end = (uint64_t)(pkt->getAddr() + pkt->getSize() - 1);
+    for (auto it = present.begin(); it != present.end(); it++) {
+      start = std::min(start, it->first);
+      end = std::max(end, it->first);
+    }
+
+    std::vector<uint8_t> tmp(pkt->getSize());
+    pkt->writeData(tmp.data());
+    for (auto i = 0; i < pkt->getSize(); i++) {
+      present[i + pkt->getAddr()] = tmp[i];
+    }
+
+    std::vector<uint8_t> buffer(end - start + 1);
+    for (auto i = start; i <= end; i++) {
+      buffer[i - start] = present.at(i);
+    }
+
+    const auto newPkt = new Packet(pkt, true, true);
+    newPkt->setAddr(Addr(start));
+    newPkt->setData(buffer.data());
+    // pkt->setSize(buffer.size());
+    insert(newPkt);
+  } else {
+    insert(pkt);
+  }
 
   stats.missLatency.sample(curTick() - missTime);
 
@@ -347,6 +374,7 @@ bool SlappCache::accessFunctional(PacketPtr pkt) {
   const auto set_index = upper_bits & (sets - 1);
   // const auto tag = upper_bits >> (uint64_t)(std::log2(sets));
 
+  std::vector<std::pair<uint64_t, uint64_t>> evictions;
   uint64_t target = 0;
   for (const auto &meta : metadata[set_index]) {
     // check each of the tags in the set for a match
@@ -354,14 +382,14 @@ bool SlappCache::accessFunctional(PacketPtr pkt) {
     // but the hardware equivalent would do a tag and offset check
     const auto start = address;
     const auto end = address + pkt->getSize() - 1;
-    // FIXME: how to handle a partial miss?
     const auto partial_miss =
         meta.valid && (((start <= meta.end) && (end > meta.end)) ||
                        ((start < meta.start) && (end >= meta.start)));
     if (partial_miss) {
       DPRINTF(SlappCache, "Partial miss: %x %x %x %x\n", start, end, meta.start,
               meta.end);
-      evict(set_index, target);
+      // evict(set_index, target);
+      evictions.emplace_back(set_index, target);
     }
 
     // panic_if(partial_miss, "Encountered partial miss unimplemented\n");
@@ -394,11 +422,22 @@ bool SlappCache::accessFunctional(PacketPtr pkt) {
     return true;
   }
 
-  // miss
+  // miss, possibly partial
+  present.clear();
+  for (const auto &[set_index, target] : evictions) {
+    const auto &meta = metadata[set_index][target];
+    for (auto i = meta.start; i <= meta.end; i++) {
+      present[i] = heap.data()[meta.offset + i - meta.start];
+    }
+
+    evict(set_index, target, false);
+  }
+
   return false;
 }
 
-void SlappCache::evict(const uint64_t set_index, const uint64_t target) {
+void SlappCache::evict(const uint64_t set_index, const uint64_t target,
+                       bool write_back) {
   panic_if(target >= associativity,
            "Should never evict a block that doesn't exist");
 
@@ -414,7 +453,8 @@ void SlappCache::evict(const uint64_t set_index, const uint64_t target) {
   DPRINTF(SlappCache, "Writing packet back %s\n", new_pkt->print());
 
   // Send the write to memory
-  memPort.sendPacket(new_pkt);
+  if (write_back)
+    memPort.sendPacket(new_pkt);
   auto write_ptr = offset, read_ptr = offset + size;
   while (read_ptr < writePointer) {
     heap[write_ptr++] = heap[read_ptr++];
@@ -464,7 +504,7 @@ void SlappCache::insert(PacketPtr pkt) {
            "Should never evict a block that doesn't exist");
 
   if (metadata[set_index][target].valid) {
-    evict(set_index, target);
+    evict(set_index, target, true);
   }
 
   panic_if((writePointer + pkt->getSize()) > capacity,
