@@ -347,6 +347,7 @@ bool SlappCache::accessFunctional(PacketPtr pkt) {
   const auto set_index = upper_bits & (sets - 1);
   // const auto tag = upper_bits >> (uint64_t)(std::log2(sets));
 
+  uint64_t target = 0;
   for (const auto &meta : metadata[set_index]) {
     // check each of the tags in the set for a match
     // to simplify the code, we compare entire addresses,
@@ -354,6 +355,18 @@ bool SlappCache::accessFunctional(PacketPtr pkt) {
     const auto start = address;
     const auto end = address + pkt->getSize() - 1;
     // FIXME: how to handle a partial miss?
+    const auto partial_miss =
+        meta.valid && (((start <= meta.end) && (end > meta.end)) ||
+                       ((start < meta.start) && (end >= meta.start)));
+    if (partial_miss) {
+      DPRINTF(SlappCache, "Partial miss: %x %x %x %x\n", start, end, meta.start,
+              meta.end);
+      evict(set_index, target);
+    }
+
+    // panic_if(partial_miss, "Encountered partial miss unimplemented\n");
+
+    target++;
     if (!(meta.valid && (start >= meta.start) && (end <= meta.end)))
       continue;
 
@@ -385,6 +398,46 @@ bool SlappCache::accessFunctional(PacketPtr pkt) {
   return false;
 }
 
+void SlappCache::evict(const uint64_t set_index, const uint64_t target) {
+  panic_if(target >= associativity,
+           "Should never evict a block that doesn't exist");
+
+  // write back the data
+  // create a new request-packet pair
+  auto &meta = metadata[set_index][target];
+  const auto offset = meta.offset;
+  const auto size = meta.end - meta.start + 1;
+  RequestPtr req = std::make_shared<Request>(meta.start, size, 0, 0);
+  PacketPtr new_pkt = new Packet(req, MemCmd::WritebackDirty, size);
+  new_pkt->dataStatic(&heap.data()[offset]);
+
+  DPRINTF(SlappCache, "Writing packet back %s\n", new_pkt->print());
+
+  // Send the write to memory
+  memPort.sendPacket(new_pkt);
+  auto write_ptr = offset, read_ptr = offset + size;
+  while (read_ptr < writePointer) {
+    heap[write_ptr++] = heap[read_ptr++];
+  }
+
+  for (auto &set : metadata) {
+    for (auto &meta : set) {
+      if (meta.offset >= offset) {
+        meta.offset -= size;
+      }
+    }
+  }
+
+  writePointer -= size;
+  DPRINTF(SlappCache, "write Pointer: %x %x\n", writePointer, write_ptr);
+  panic_if(writePointer != write_ptr,
+           "Write pointers should sync after eviction");
+  meta.valid = false;
+  meta.start = 0;
+  meta.end = 0;
+  meta.offset = 0;
+}
+
 void SlappCache::insert(PacketPtr pkt) {
   // The address should not be in the cache
   assert(!accessFunctional(pkt));
@@ -406,41 +459,12 @@ void SlappCache::insert(PacketPtr pkt) {
     target = i;
     break;
   }
+
   panic_if(target >= associativity,
            "Should never evict a block that doesn't exist");
 
-  // if actually evicting, write back the data
   if (metadata[set_index][target].valid) {
-    // write back the data.
-    // create a new request-packet pair
-    auto &meta = metadata[set_index][target];
-    const auto offset = meta.offset;
-    const auto size = meta.end - meta.start + 1;
-    RequestPtr req = std::make_shared<Request>(meta.start, size, 0, 0);
-    PacketPtr new_pkt = new Packet(req, MemCmd::WritebackDirty, size);
-    new_pkt->dataStatic(&heap.data()[offset]);
-
-    DPRINTF(SlappCache, "Writing packet back %s\n", new_pkt->print());
-    // Send the write to memory
-    memPort.sendPacket(new_pkt);
-    auto write_ptr = offset;
-    for (auto read_ptr = write_ptr + size; read_ptr < capacity; read_ptr++) {
-      heap[write_ptr++] = heap[read_ptr];
-    }
-
-    for (auto &set : metadata) {
-      for (auto &meta : set) {
-        if (meta.offset >= offset) {
-          meta.offset -= size;
-        }
-      }
-    }
-
-    writePointer -= size;
-    meta.valid = false;
-    meta.start = 0;
-    meta.end = 0;
-    meta.offset = 0;
+    evict(set_index, target);
   }
 
   panic_if((writePointer + pkt->getSize()) > capacity,
@@ -471,25 +495,6 @@ void SlappCache::insert(PacketPtr pkt) {
 
   DPRINTF(SlappCache, "offset: %lx, ptr: %p\n",
           metadata[set_index][target].offset, ptr);
-  // const auto maxSize = size / sets;
-  // while ((maxSize - setSize) < pkt->getSize()) {
-  //   const auto &block = store[setIndex].begin();
-  //   const auto blockSize = block->end - block->start + 1;
-  //   // Write back the data.
-  //   // Create a new request-packet pair
-  //   RequestPtr req = std::make_shared<Request>(block->start, blockSize, 0,
-  //   0);
-  //
-  //   PacketPtr new_pkt = new Packet(req, MemCmd::WritebackDirty, blockSize);
-  //   new_pkt->dataDynamic(block->data); // This will be deleted later
-  //
-  //   DPRINTF(SlappCache, "Writing packet back %s\n", new_pkt->print());
-  //   // Send the write to memory
-  //   memPort.sendPacket(new_pkt);
-  //
-  //   setSize -= blockSize;
-  //   store[setIndex].erase(block);
-  // }
 }
 
 AddrRangeList SlappCache::getAddrRanges() const {

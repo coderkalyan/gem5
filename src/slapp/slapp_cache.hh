@@ -135,6 +135,8 @@ private:
    * Mostly just forwards requests to the cache (owner)
    */
   class MemSidePort : public RequestPort {
+    friend class SlappCache;
+
   private:
     /// The object that owns this object (SlappCache)
     SlappCache *owner;
@@ -247,6 +249,8 @@ private:
    * @return true if a hit, false otherwise
    */
   bool accessFunctional(PacketPtr pkt);
+
+  void evict(const uint64_t set_index, const uint64_t target);
 
   /**
    * Insert a block into the cache. If there is no room left in the cache,
