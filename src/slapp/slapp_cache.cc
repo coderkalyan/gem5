@@ -182,6 +182,12 @@ bool SlappCache::handleRequest(PacketPtr pkt, int port_id) {
   }
 
   DPRINTF(SlappCache, "Got request for addr %#x\n", pkt->getAddr());
+  if (pkt->getAddr() >= 512ULL * 1024 * 1024) { // Outside 512MB
+    warn("SLAPP: Dropping insane address 0x%llx\n", pkt->getAddr());
+    pkt->makeResponse();
+    cpuPorts[port_id].sendPacket(pkt); 
+    return true;
+  }
 
   // This cache is now blocked waiting for the response to this packet.
   blocked = true;
