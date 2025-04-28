@@ -182,12 +182,19 @@ bool SlappCache::handleRequest(PacketPtr pkt, int port_id) {
   }
 
   DPRINTF(SlappCache, "Got request for addr %#x\n", pkt->getAddr());
-  if (pkt->getAddr() >= 512ULL * 1024 * 1024) { // Outside 512MB
-    warn("SLAPP: Dropping insane address 0x%llx\n", pkt->getAddr());
-    pkt->makeResponse();
-    pkt->setBadAddress();
-    cpuPorts[port_id].sendPacket(pkt);
-    return true;
+  if (pkt->getAddr() >= 512ULL * 1024 * 1024) {
+      warn("SLAPP: Scheduling BadAddress for insane addr 0x%llx\n", pkt->getAddr());
+      blocked = true;
+      assert(waitingPortId == -1);
+      waitingPortId = port_id;
+
+      // Delay and respond later
+      schedule(new EventFunctionWrapper([this, pkt] {
+          handleBadAddress(pkt);
+      }, name() + ".badAddrEvent", true),
+      clockEdge(latency));
+
+      return true;
   }
 
   // This cache is now blocked waiting for the response to this packet.
@@ -203,6 +210,15 @@ bool SlappCache::handleRequest(PacketPtr pkt, int port_id) {
            clockEdge(latency));
 
   return true;
+}
+
+void SlappCache::handleBadAddress(PacketPtr pkt) {
+  pkt->makeResponse();
+  pkt->setBadAddress();
+
+  sendResponse(pkt);
+
+  DPRINTF(SlappCache, "Responded with BadAddress for insane addr %#x\n", pkt->getAddr());
 }
 
 bool SlappCache::handleResponse(PacketPtr pkt) {

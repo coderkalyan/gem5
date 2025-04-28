@@ -241,6 +241,8 @@
     * access latency has already elapsed.
     */
    void accessTiming(PacketPtr pkt);
+
+   void handleBadAddress(PacketPtr pkt);
  
    /**
     * This is where we actually update / read from the cache. This function
