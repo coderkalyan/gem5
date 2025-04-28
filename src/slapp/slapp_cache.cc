@@ -185,7 +185,8 @@ bool SlappCache::handleRequest(PacketPtr pkt, int port_id) {
   if (pkt->getAddr() >= 512ULL * 1024 * 1024) { // Outside 512MB
     warn("SLAPP: Dropping insane address 0x%llx\n", pkt->getAddr());
     pkt->makeResponse();
-    cpuPorts[port_id].sendPacket(pkt); 
+    pkt->setBadAddress();
+    cpuPorts[port_id].sendPacket(pkt);
     return true;
   }
 
