@@ -64,7 +64,7 @@ private:
 
     /// If we tried to send a packet and it was blocked, store it here
     PacketPtr blockedPacket;
-
+    
   public:
     /**
      * Constructor. Just calls the superclass constructor.
@@ -159,6 +159,7 @@ private:
      * @param packet to send.
      */
     void sendPacket(PacketPtr pkt);
+    bool isBlocked() const { return blockedPacket != nullptr; }
 
   protected:
     /**
@@ -316,6 +317,12 @@ private:
   std::unordered_map<uint64_t, uint8_t> present;
 
   Random::RandomPtr rng = Random::genRandom();
+
+    /// True if there is an eviction waiting to be retried
+  bool pendingEviction = false;
+
+  /// The set index and target of the pending eviction
+  std::pair<uint64_t, uint64_t> pendingEvictTarget;
 
   /// Cache statistics
 protected:
