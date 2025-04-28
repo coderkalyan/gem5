@@ -456,36 +456,8 @@ void SlappCache::evict(const uint64_t set_index, const uint64_t target,
   new_pkt->dataStatic(&heap.data()[offset]);
 
   DPRINTF(SlappCache, "Writing packet back %s\n", new_pkt->print());
-  if (write_back) {
-    RequestPtr req = std::make_shared<Request>(meta.start, size, 0, 0);
-    PacketPtr new_pkt = new Packet(req, MemCmd::WritebackDirty, size);
-    new_pkt->dataStatic(&heap.data()[offset]);
-
-    DPRINTF(SlappCache, "Writing packet back %s\n", new_pkt->print());
-
-    if (memPort.isBlocked()) {
-      if (!pendingEviction) {
-        pendingEviction = true;
-        pendingEvictTarget = std::make_pair(set_index, target);
-
-        schedule(new EventFunctionWrapper([this]() {
-            if (!memPort.isBlocked()) {
-                auto [set_idx, victim] = this->pendingEvictTarget;
-                this->pendingEviction = false;
-                this->evict(set_idx, victim, true);
-            } else {
-                schedule(new EventFunctionWrapper([this]() {
-                    auto [set_idx, victim] = this->pendingEvictTarget;
-                    this->evict(set_idx, victim, true);
-                }, name() + ".retryEvictEvent", true), clockEdge(Cycles(1)));
-            }
-        }, name() + ".retryEvictEvent", true), clockEdge(Cycles(1)));
-      }
-      return;
-    }
-
+  if (write_back)
     memPort.sendPacket(new_pkt);
-  }
   auto write_ptr = offset, read_ptr = offset + size;
   while (read_ptr < writePointer) {
     heap[write_ptr++] = heap[read_ptr++];
