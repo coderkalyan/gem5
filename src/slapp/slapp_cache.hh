@@ -268,6 +268,8 @@ private:
    */
   void insert(PacketPtr pkt);
 
+  void allocate(PacketPtr pkt);
+
   /**
    * Return the address ranges this cache is responsible for. Just use the
    * same as the next upper level of the hierarchy.

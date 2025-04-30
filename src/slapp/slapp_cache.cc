@@ -81,6 +81,7 @@ AddrRangeList SlappCache::CPUSidePort::getAddrRanges() const {
 // If the cache is currently busy (waiting for memory to respond)
 // the request is rejected.
 bool SlappCache::CPUSidePort::recvTimingReq(PacketPtr pkt) {
+  DPRINTF(SlappCache, "Begin transaction --------\n");
   DPRINTF(SlappCache, "Received CPU timing request: %s\n", pkt->print());
 
   // currently we only support word sized requests
@@ -239,9 +240,10 @@ bool SlappCache::handleTimingReq(PacketPtr pkt, int port_id) {
   waitingPortId = port_id;
 
   // Schedule an event after cache access latency to actually access
-  schedule(new EventFunctionWrapper([this, pkt] { accessTiming(pkt); },
-                                    name() + ".accessEvent", true),
-           clockEdge(latency));
+  accessTiming(pkt);
+  // schedule(new EventFunctionWrapper([this, pkt] { accessTiming(pkt); },
+  //                                   name() + ".accessEvent", true),
+  //          clockEdge(latency));
 
   return true;
 }
@@ -277,7 +279,7 @@ bool SlappCache::handleTimingResp(PacketPtr pkt) {
     panic_if(!hit, "Expected hit after inserting packet");
 
     originalPacket->makeResponse();
-    delete pkt;
+    // delete pkt;
     pkt = originalPacket;
     originalPacket = nullptr;
   }
@@ -314,16 +316,25 @@ void SlappCache::sendResponse(PacketPtr pkt) {
 }
 
 void SlappCache::handleFunctional(PacketPtr pkt) {
+  DPRINTF(SlappCache, "Handling functional request for %s\n", pkt->print());
   const auto hit = accessFunctional(pkt);
   if (hit) {
+    assert(memPort.outstanding.empty());
     pkt->makeResponse();
   } else {
+    while (!memPort.outstanding.empty()) {
+      memPort.sendFunctional(memPort.outstanding.front());
+      memPort.outstanding.pop();
+    }
     memPort.sendFunctional(pkt);
   }
 }
 
 void SlappCache::accessTiming(PacketPtr pkt) {
+  assert(memPort.outstanding.empty());
   const auto hit = accessFunctional(pkt);
+  if (hit)
+    assert(memPort.outstanding.empty());
 
   DPRINTF(SlappCache, "%s for packet: %s\n", hit ? "Hit" : "Miss",
           pkt->print());
@@ -333,10 +344,16 @@ void SlappCache::accessTiming(PacketPtr pkt) {
     stats.hits++; // update stats
     DDUMP(SlappCache, pkt->getConstPtr<uint8_t>(), pkt->getSize());
     pkt->makeResponse();
+    assert(originalPacket == nullptr);
     sendResponse(pkt);
   } else {
     stats.misses++; // update stats
     missTime = curTick();
+
+    // Pre-allocate a slot in the metadata array if we need to evict.
+    // This ensures we process all eviction transactions strictly
+    // before the read request that fills the cache.
+    allocate(pkt);
 
     // Forward to the memory side. This needs to be upgraded
     // to the prefetch size.
@@ -348,6 +365,8 @@ void SlappCache::accessTiming(PacketPtr pkt) {
     // FIXME: implement prefetching
     size = 8;
     address = address & ~7;
+    DPRINTF(SlappCache, "Miss for packet %s, upgrading to address %x size %d\n",
+            pkt->print(), address, size);
 
     // Unaligned access to one cache block
     assert(pkt->needsResponse());
@@ -381,6 +400,7 @@ void SlappCache::accessTiming(PacketPtr pkt) {
 }
 
 bool SlappCache::accessFunctional(PacketPtr pkt) {
+  DPRINTF(SlappCache, "Accessing functional: %s\n", pkt->print());
   const auto address = pkt->getAddr();
   const auto upper_bits = (uint64_t)(address) >> 6; // remove byte offset
   const auto set_index = upper_bits & (sets - 1);
@@ -429,7 +449,7 @@ bool SlappCache::accessFunctional(PacketPtr pkt) {
 
     // hit
     // we should not have any partial misses in this case
-    // assert(memPort.outstanding.empty());
+    assert(memPort.outstanding.empty());
     return true;
   }
 
@@ -486,16 +506,7 @@ void SlappCache::evict(const uint64_t set_index, const uint64_t target) {
   meta.offset = 0;
 }
 
-void SlappCache::insert(PacketPtr pkt) {
-  // The address should not be in the cache, we don't
-  // want synonyms
-  assert(!accessFunctional(pkt));
-  // this false access functional could cause unecessary evictions,
-  // so clear the queue
-
-  // The pkt should be a response
-  assert(pkt->isResponse());
-
+void SlappCache::allocate(PacketPtr pkt) {
   const auto address = pkt->getAddr();
   const auto upper_bits = (uint64_t)(address) >> 6; // remove byte offset
   const auto set_index = upper_bits & (sets - 1);
@@ -518,6 +529,40 @@ void SlappCache::insert(PacketPtr pkt) {
   if (metadata[set_index][target].valid) {
     evict(set_index, target);
   }
+
+  // process the eviction if needed
+  // memPort.process();
+}
+
+void SlappCache::insert(PacketPtr pkt) {
+  // The address should not be in the cache, we don't
+  // want synonyms
+  assert(!accessFunctional(pkt));
+  // this false access functional could cause unecessary evictions,
+  // so clear the queue
+
+  // The pkt should be a response
+  assert(pkt->isResponse());
+
+  const auto address = pkt->getAddr();
+  const auto upper_bits = (uint64_t)(address) >> 6; // remove byte offset
+  const auto set_index = upper_bits & (sets - 1);
+  // const auto tag = upper_bits >> (uint64_t)(std::log2(sets));
+
+  // FIXME: implement eviction policy, currently round robin
+  auto target = 0;
+  for (size_t i = 0; i < associativity; i++) {
+    if (metadata[set_index][i].valid)
+      continue;
+    target = i;
+    break;
+  }
+
+  panic_if(target >= associativity,
+           "Should never evict a block that doesn't exist");
+
+  // we should have made space earlier in allocate()
+  panic_if(metadata[set_index][target].valid, "Expected empty space");
 
   panic_if((writePointer + pkt->getSize()) > capacity,
            "Not enough space in the cache to insert the block");
@@ -547,9 +592,6 @@ void SlappCache::insert(PacketPtr pkt) {
 
   DPRINTF(SlappCache, "offset: %lx, ptr: %p\n",
           metadata[set_index][target].offset, ptr);
-
-  // process the eviction if needed
-  memPort.process();
 }
 
 SlappCache::SlappCacheStats::SlappCacheStats(statistics::Group *parent)
