@@ -26,8 +26,8 @@ system.mem_mode = "timing"
 system.mem_ranges = [AddrRange("512MB")]
 system.membus = SystemXBar()
 
-# system.cpu = X86TimingSimpleCPU()
-system.cpu = X86O3CPU()
+system.cpu = X86TimingSimpleCPU()
+# system.cpu = X86O3CPU()
 system.slapp = SlappCache()
 system.slapp.mem_side = system.membus.cpu_side_ports
 # system.cpu.icache_port = system.slapp.inst_port

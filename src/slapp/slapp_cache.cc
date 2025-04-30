@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 #include "base/compiler.hh"
 #include "debug/SlappCache.hh"
@@ -72,114 +73,166 @@ Port &SlappCache::getPort(const std::string &if_name, PortID idx) {
   }
 }
 
-void SlappCache::CPUSidePort::sendPacket(PacketPtr pkt) {
-  // Note: This flow control is very simple since the cache is blocking.
-
-  panic_if(blockedPacket != nullptr, "Should never try to send if blocked!");
-
-  // If we can't send the packet across the port, store it for later.
-  DPRINTF(SlappCache, "Sending %s to CPU\n", pkt->print());
-  if (!sendTimingResp(pkt)) {
-    DPRINTF(SlappCache, "failed!\n");
-    blockedPacket = pkt;
-  }
-}
-
 AddrRangeList SlappCache::CPUSidePort::getAddrRanges() const {
   return owner->getAddrRanges();
 }
 
-void SlappCache::CPUSidePort::trySendRetry() {
-  if (needRetry && blockedPacket == nullptr) {
-    // Only send a retry if the port is now completely free
-    needRetry = false;
-    DPRINTF(SlappCache, "Sending retry req.\n");
-    sendRetryReq();
+// Receive a request packet from the CPU and try to process it.
+// If the cache is currently busy (waiting for memory to respond)
+// the request is rejected.
+bool SlappCache::CPUSidePort::recvTimingReq(PacketPtr pkt) {
+  DPRINTF(SlappCache, "Received CPU timing request: %s\n", pkt->print());
+
+  // currently we only support word sized requests
+  if (pkt->getSize() > 8) {
+    DPRINTF(SlappCache, "Surprisingly large packet: %d bytes\n",
+            pkt->getSize());
+    panic("unexpected packet size");
+  }
+
+  // this is a blocking cache, so if the CPU sends another request
+  // before it has accepted a previous response, reject it
+  // only one request in flight at a time
+  if (outstanding.has_value()) {
+    DPRINTF(SlappCache, "Timing request %s blocked on response %s\n",
+            pkt->print(), outstanding.value()->print());
+    retry = true; // remember to send a retry request once unblocked
+    return false;
+  }
+
+  // forward the request to the cache, which may reject it
+  // if blocked on a memory request.
+  const auto handled = owner->handleTimingReq(pkt, id);
+  if (handled) {
+    DPRINTF(SlappCache, "Timing request %s succeeded\n", pkt->print());
+    return true;
+  } else {
+    DPRINTF(SlappCache, "Timing request %s blocked on cache busy\n",
+            pkt->print());
+    retry = true; // remember to send a retry request once unblocked
+    return false;
   }
 }
 
 void SlappCache::CPUSidePort::recvFunctional(PacketPtr pkt) {
-  // Just forward to the cache.
-  return owner->handleFunctional(pkt);
+  // Functional requests cannot fail, so blindly forward
+  // to the cache.
+  owner->handleFunctional(pkt);
 }
 
-bool SlappCache::CPUSidePort::recvTimingReq(PacketPtr pkt) {
-  DPRINTF(SlappCache, "Got request %s\n", pkt->print());
+void SlappCache::CPUSidePort::sendPacket(PacketPtr pkt) {
+  // reply to the original cpu request with a response packet.
+  panic_if(outstanding.has_value(), "Should never try to send if blocked!");
 
-  if (blockedPacket || needRetry) {
-    // The cache may not be able to send a reply if this is blocked
-    DPRINTF(SlappCache, "Request blocked\n");
-    needRetry = true;
-    return false;
-  }
-  // Just forward to the cache.
-  if (!owner->handleRequest(pkt, id)) {
-    DPRINTF(SlappCache, "Request failed\n");
-    // stalling
-    needRetry = true;
-    return false;
+  // If the CPU is busy, store the oustanding packet and retry later.
+  DPRINTF(SlappCache, "Sending response %s\n", pkt->print());
+  const auto received = sendTimingResp(pkt);
+  if (received) {
+    DPRINTF(SlappCache, "CPU accepted cache response for %s\n", pkt->print());
   } else {
-    DPRINTF(SlappCache, "Request succeeded\n");
-    return true;
+    DPRINTF(SlappCache, "CPU response port busy for %s\n", pkt->print());
+    outstanding = pkt;
   }
 }
 
 void SlappCache::CPUSidePort::recvRespRetry() {
+  // Called by the CPU if it previously failed to accept a response
+  // and is now (potentially) available.
+
   // We should have a blocked packet if this function is called.
-  assert(blockedPacket != nullptr);
+  panic_if(!outstanding.has_value(), "Received spurious response retry\n");
 
-  // Grab the blocked packet.
-  PacketPtr pkt = blockedPacket;
-  blockedPacket = nullptr;
-
-  DPRINTF(SlappCache, "Retrying response pkt %s\n", pkt->print());
-  // Try to resend it. It's possible that it fails again.
+  const auto pkt = outstanding.value();
+  DPRINTF(SlappCache, "Retrying response %s\n", pkt->print());
   sendPacket(pkt);
 
-  // We may now be able to accept new packets
+  // if the response port is now free (we successfully sent the
+  // packet above, AND the CPU was waiting on a request, tell
+  // it to retry the request
   trySendRetry();
 }
 
-void SlappCache::MemSidePort::sendPacket(PacketPtr pkt) {
-  // Note: This flow control is very simple since the cache is blocking.
-
-  panic_if(blockedPacket != nullptr, "Should never try to send if blocked!");
-
-  // If we can't send the packet across the port, store it for later.
-  if (!sendTimingReq(pkt)) {
-    blockedPacket = pkt;
+void SlappCache::CPUSidePort::trySendRetry() {
+  if (!outstanding.has_value() && retry) {
+    DPRINTF(SlappCache,
+            "Response succeeded and CPU waiting, sending retry request.\n");
+    retry = false;
+    sendRetryReq();
   }
-}
-
-bool SlappCache::MemSidePort::recvTimingResp(PacketPtr pkt) {
-  // Just forward to the cache.
-  return owner->handleResponse(pkt);
-}
-
-void SlappCache::MemSidePort::recvReqRetry() {
-  // We should have a blocked packet if this function is called.
-  assert(blockedPacket != nullptr);
-
-  // Grab the blocked packet.
-  PacketPtr pkt = blockedPacket;
-  blockedPacket = nullptr;
-
-  // Try to resend it. It's possible that it fails again.
-  sendPacket(pkt);
 }
 
 void SlappCache::MemSidePort::recvRangeChange() { owner->sendRangeChange(); }
 
-bool SlappCache::handleRequest(PacketPtr pkt, int port_id) {
+bool SlappCache::MemSidePort::process() {
+  if (outstanding.empty()) {
+    DPRINTF(SlappCache, "Finished processing memory queue\n");
+    return true;
+  }
+
+  // Grab the first packet (we process in order) and try to send it.
+  const auto &pkt = outstanding.front();
+  const auto sent = sendTimingReq(pkt);
+  if (sent) {
+    DPRINTF(SlappCache, "Successfully sent pkt %s from queue\n", pkt->print());
+    outstanding.pop();
+  } else {
+    DPRINTF(SlappCache, "Memory request port busy\n");
+  }
+
+  return outstanding.empty();
+}
+
+bool SlappCache::MemSidePort::recvTimingResp(PacketPtr pkt) {
+  DPRINTF(SlappCache, "Received memory timing response for %s\n", pkt->print());
+  // In case of a partial miss, the first packets in the queue
+  // are all write packets, and the final packet is a read.
+  if (outstanding.empty()) {
+    // Forward this read response to the owner
+    panic_if(!pkt->isRead(), "Expected last memory response to be read");
+    DPRINTF(SlappCache,
+            "Received response to read request %s, forwarding to cache\n",
+            pkt->print());
+    return owner->handleTimingResp(pkt);
+  } else {
+    panic_if(!pkt->isWrite(), "Expected memory response to be write");
+    DPRINTF(SlappCache, "Received resposne to write request %s. Sending next\n",
+            pkt->print());
+    // FIXME: is it correct to send another packet or
+    // do we need to acknowledge first?
+    return process();
+  }
+}
+
+void SlappCache::MemSidePort::recvReqRetry() {
+  // Memory is ready for us to try to send something from the queue.
+
+  // We should not have popped a failed packet from the queue.
+  panic_if(outstanding.empty(), "Expected outstanding packet(s)");
+
+  process();
+}
+
+AddrRangeList SlappCache::getAddrRanges() const {
+  DPRINTF(SlappCache, "Sending new ranges\n");
+  // Just use the same ranges as whatever is on the memory side.
+  return memPort.getAddrRanges();
+}
+
+void SlappCache::sendRangeChange() const {
+  for (auto &port : cpuPorts) {
+    port.sendRangeChange();
+  }
+}
+
+bool SlappCache::handleTimingReq(PacketPtr pkt, int port_id) {
   if (blocked) {
-    // There is currently an outstanding request so we can't respond. Stall
+    // There is currently an outstanding request so we can't respond.
     return false;
   }
 
-  DPRINTF(SlappCache, "Got request for addr %#x\n", pkt->getAddr());
-
   // This cache is now blocked waiting for the response to this packet.
   blocked = true;
+  DPRINTF(SlappCache, "Handling request pkt %s\n", pkt->print());
 
   // Store the port for when we get the response
   assert(waitingPortId == -1);
@@ -193,96 +246,55 @@ bool SlappCache::handleRequest(PacketPtr pkt, int port_id) {
   return true;
 }
 
-bool SlappCache::handleResponse(PacketPtr pkt) {
+bool SlappCache::handleTimingResp(PacketPtr pkt) {
+  // Should not get here unless blocked (waiting for read from memory)
   assert(blocked);
-  DPRINTF(SlappCache, "Got response for addr %#x\n", pkt->getAddr());
+
+  DPRINTF(SlappCache, "Received read response pkt %s\n", pkt->print());
   DDUMP(SlappCache, pkt->getConstPtr<uint8_t>(), pkt->getSize());
 
   // For now assume that inserts are off of the critical path and don't count
   // for any added latency.
-  if (present.size() > 0) {
-    // partial miss response, stitch together
-    auto start = (uint64_t)(pkt->getAddr());
-    auto end = (uint64_t)(pkt->getAddr() + pkt->getSize() - 1);
-    for (auto it = present.begin(); it != present.end(); it++) {
-      start = std::min(start, it->first);
-      end = std::max(end, it->first);
-    }
+  // Because we currently flush all partial miss packets and re-request
+  // the entire (prefetched) range, there is no need to assemble anything
+  // here. Just insert the received packet into cache.
+  insert(pkt);
 
-    std::vector<uint8_t> tmp(pkt->getSize());
-    pkt->writeData(tmp.data());
-    for (auto i = 0; i < pkt->getSize(); i++) {
-      present[i + pkt->getAddr()] = tmp[i];
-    }
-
-    std::vector<uint8_t> buffer(end - start + 1);
-    for (auto i = start; i <= end; i++) {
-      buffer[i - start] = present.at(i);
-    }
-
-    const auto newPkt = new Packet(pkt, true, true);
-    newPkt->setAddr(Addr(start));
-    newPkt->setData(buffer.data());
-    // pkt->setSize(buffer.size());
-    insert(newPkt);
-  } else {
-    insert(pkt);
-  }
-
+  // Update timing statistics based on how long it took to fetch data
+  // from memory, including potential flush.
   stats.missLatency.sample(curTick() - missTime);
 
-  // If we had to upgrade the request packet to a full cache line, now we
-  // can use that packet to construct the response.
-  // if (originalPacket != nullptr) {
-  //     DPRINTF(SlappCache, "Copying data from new packet to old\n");
-  //     // We had to upgrade a previous packet. We can functionally deal with
-  //     // the cache access now. It better be a hit.
-  //     [[maybe_unused]] bool hit = accessFunctional(originalPacket);
-  //     if (!hit) {
-  //         const Addr packetAddr = originalPacket->getAddr();
-  //         const uint64_t wordOffset = (packetAddr >> 3) & (rmax - 1);
-  //         const uint64_t setIndex =
-  //             ((uint64_t)packetAddr >> (uint64_t)std::log2(8 * rmax)) &
-  //             (8 * rmax - 1);
-  //         const uint64_t regionTag =
-  //             ((uint64_t)packetAddr >> (uint64_t)std::log2(8 * rmax *
-  //             sets)) & (8 * rmax * sets - 1);
-  //
-  //         DPRINTF(SlappCache,
-  //                 "response: packetAddr = %lx, size = %lu, wordOffset =
-  //                 %lx, " "setIndex = "
-  //                 "%lx, regionTag "
-  //                 "= %lx\n",
-  //                 packetAddr, originalPacket->getSize(), wordOffset,
-  //                 setIndex, regionTag);
-  //
-  //         auto &block = store[setIndex].back();
-  //         DPRINTF(SlappCache,
-  //                 "last block in set: setIndex = %lx, regionTag = %lx,
-  //                 start "
-  //                 "= %lx, end = "
-  //                 "%lx\n",
-  //                 setIndex, block.regionTag, block.start, block.end);
-  //     }
-  //
-  //     panic_if(!hit, "Should always hit after inserting");
-  //     originalPacket->makeResponse();
-  //     delete pkt; // We may need to delay this, I'm not sure.
-  //     pkt = originalPacket;
-  //     originalPacket = nullptr;
-  // } // else, pkt contains the data it needs
+  // If we upgraded the request packet to a larger block size than
+  // the original request packet, we need to construct the response.
+  // Otherwise just use the response packet.
+  if (originalPacket != nullptr) {
+    DPRINTF(SlappCache, "Assembling response pkt %s from block read %s\n",
+            originalPacket->print(), pkt->print());
 
+    // We had to upgrade a previous packet. We can functionally deal with
+    // the cache access now. It better be a hit since we inserted.
+    const bool hit = accessFunctional(originalPacket);
+    panic_if(!hit, "Expected hit after inserting packet");
+
+    originalPacket->makeResponse();
+    delete pkt;
+    pkt = originalPacket;
+    originalPacket = nullptr;
+  }
+
+  // Send the response to the CPU now. We never fail or block here.
   sendResponse(pkt);
-
   return true;
 }
 
 void SlappCache::sendResponse(PacketPtr pkt) {
+  // We should still be blocked when we respond to the CPU.
   assert(blocked);
-  DPRINTF(SlappCache, "Sending resp for addr %#x\n", pkt->getAddr());
+
+  DPRINTF(SlappCache, "Sending response for pkt %s\n", pkt->print());
   DDUMP(SlappCache, pkt->getConstPtr<uint8_t>(), pkt->getSize());
 
-  int port = waitingPortId;
+  const auto port = waitingPortId;
 
   // The packet is now done. We're about to put it in the port, no need for
   // this object to continue to stall.
@@ -302,7 +314,8 @@ void SlappCache::sendResponse(PacketPtr pkt) {
 }
 
 void SlappCache::handleFunctional(PacketPtr pkt) {
-  if (accessFunctional(pkt)) {
+  const auto hit = accessFunctional(pkt);
+  if (hit) {
     pkt->makeResponse();
   } else {
     memPort.sendFunctional(pkt);
@@ -310,7 +323,7 @@ void SlappCache::handleFunctional(PacketPtr pkt) {
 }
 
 void SlappCache::accessTiming(PacketPtr pkt) {
-  bool hit = accessFunctional(pkt);
+  const auto hit = accessFunctional(pkt);
 
   DPRINTF(SlappCache, "%s for packet: %s\n", hit ? "Hit" : "Miss",
           pkt->print());
@@ -324,47 +337,46 @@ void SlappCache::accessTiming(PacketPtr pkt) {
   } else {
     stats.misses++; // update stats
     missTime = curTick();
-    // Forward to the memory side.
-    memPort.sendPacket(pkt);
 
-    // FIXME: implement a spatial size predictor
-    // Addr addr = pkt->getAddr();
-    // auto blockSize = pkt->getSize();
-    // Addr block_addr = pkt->getAddr();
-    // unsigned size = pkt->getSize();
-    // if (addr == block_addr && size == blockSize) {
-    //     // Aligned and block size. We can just forward.
-    //     DPRINTF(SlappCache, "forwarding packet\n");
-    //     memPort.sendPacket(pkt);
-    // } else {
-    //     DPRINTF(SlappCache, "Upgrading packet to block size\n");
-    //     panic_if(addr - block_addr + size > blockSize,
-    //              "Cannot handle accesses that span multiple cache
-    //              lines");
-    //     // Unaligned access to one cache block
-    //     assert(pkt->needsResponse());
-    //     MemCmd cmd;
-    //     if (pkt->isWrite() || pkt->isRead()) {
-    //         // Read the data from memory to write into the block.
-    //         // We'll write the data in the cache (i.e., a writeback
-    //         cache) cmd = MemCmd::ReadReq;
-    //     } else {
-    //         panic("Unknown packet type in upgrade size");
-    //     }
-    //
-    //     // Create a new packet that is blockSize
-    //     PacketPtr new_pkt = new Packet(pkt->req, cmd, blockSize);
-    //     new_pkt->allocate();
-    //
-    //     // Should now be block aligned
-    //     assert(new_pkt->getAddr() == new_pkt->getBlockAddr(blockSize));
-    //
-    //     // Save the old packet
-    //     originalPacket = pkt;
-    //
-    //     DPRINTF(SlappCache, "forwarding packet\n");
-    //     memPort.sendPacket(new_pkt);
-    // }
+    // Forward to the memory side. This needs to be upgraded
+    // to the prefetch size.
+
+    auto address = pkt->getAddr();
+    auto size = pkt->getSize();
+    assert(size <= 8);
+
+    // FIXME: implement prefetching
+    size = 8;
+    address = address & ~7;
+
+    // Unaligned access to one cache block
+    assert(pkt->needsResponse());
+    MemCmd cmd;
+    if (pkt->isWrite() || pkt->isRead()) {
+      // Read the data from memory to write into the block.
+      // We'll write the data in the cache (i.e., a writeback
+      // cache)
+      cmd = MemCmd::ReadReq;
+    } else {
+      panic("Unknown packet type in upgrade size");
+    }
+
+    // Create a new packet that is blockSize
+    PacketPtr new_pkt = new Packet(pkt->req, cmd, size);
+    new_pkt->cmd = new_pkt->makeReadCmd(pkt->req);
+    new_pkt->allocate();
+
+    // Should now be block aligned
+    assert(new_pkt->getAddr() == address);
+
+    // Save the old packet
+    originalPacket = pkt;
+
+    DPRINTF(SlappCache, "Requesting pkt %s from memory\n", new_pkt->print());
+    memPort.outstanding.push(new_pkt);
+
+    // start processing the queue of zero or more writebacks and one read
+    memPort.process();
   }
 }
 
@@ -374,12 +386,13 @@ bool SlappCache::accessFunctional(PacketPtr pkt) {
   const auto set_index = upper_bits & (sets - 1);
   // const auto tag = upper_bits >> (uint64_t)(std::log2(sets));
 
-  std::vector<std::pair<uint64_t, uint64_t>> evictions;
-  uint64_t target = 0;
-  for (const auto &meta : metadata[set_index]) {
+  // assert(memPort.outstanding.empty());
+
+  for (uint64_t target = 0; target < associativity; target++) {
     // check each of the tags in the set for a match
     // to simplify the code, we compare entire addresses,
     // but the hardware equivalent would do a tag and offset check
+    const auto &meta = metadata[set_index][target];
     const auto start = address;
     const auto end = address + pkt->getSize() - 1;
     const auto partial_miss =
@@ -388,13 +401,9 @@ bool SlappCache::accessFunctional(PacketPtr pkt) {
     if (partial_miss) {
       DPRINTF(SlappCache, "Partial miss: %x %x %x %x\n", start, end, meta.start,
               meta.end);
-      // evict(set_index, target);
-      evictions.emplace_back(set_index, target);
+      evict(set_index, target);
     }
 
-    // panic_if(partial_miss, "Encountered partial miss unimplemented\n");
-
-    target++;
     if (!(meta.valid && (start >= meta.start) && (end <= meta.end)))
       continue;
 
@@ -419,47 +428,44 @@ bool SlappCache::accessFunctional(PacketPtr pkt) {
     }
 
     // hit
+    // we should not have any partial misses in this case
+    // assert(memPort.outstanding.empty());
     return true;
   }
 
   // miss, possibly partial
-  present.clear();
-  for (const auto &[set_index, target] : evictions) {
-    const auto &meta = metadata[set_index][target];
-    for (auto i = meta.start; i <= meta.end; i++) {
-      present[i] = heap.data()[meta.offset + i - meta.start];
-    }
-
-    evict(set_index, target, false);
-  }
-
   return false;
 }
 
-void SlappCache::evict(const uint64_t set_index, const uint64_t target,
-                       bool write_back) {
+void SlappCache::evict(const uint64_t set_index, const uint64_t target) {
   panic_if(target >= associativity,
            "Should never evict a block that doesn't exist");
 
-  // write back the data
+  // queue the data for writeback
   // create a new request-packet pair
   auto &meta = metadata[set_index][target];
   const auto offset = meta.offset;
   const auto size = meta.end - meta.start + 1;
   RequestPtr req = std::make_shared<Request>(meta.start, size, 0, 0);
-  PacketPtr new_pkt = new Packet(req, MemCmd::WritebackDirty, size);
-  new_pkt->dataStatic(&heap.data()[offset]);
+  // PacketPtr new_pkt = new Packet(req, MemCmd::WritebackDirty, size);
+  PacketPtr new_pkt = new Packet(req, MemCmd::WriteReq, size);
+  uint8_t *const data = new uint8_t[size];
+  std::copy(&heap.data()[offset], &heap.data()[offset + size - 1], data);
+  new_pkt->dataDynamic(data);
 
   DPRINTF(SlappCache, "Writing packet back %s\n", new_pkt->print());
+  DDUMP(SlappCache, new_pkt->getConstPtr<uint8_t>(), new_pkt->getSize());
 
-  // Send the write to memory
-  if (write_back)
-    memPort.sendPacket(new_pkt);
+  // Queue the write to memory.
+  memPort.outstanding.push(new_pkt);
+
+  // eagerly defragment the heap
   auto write_ptr = offset, read_ptr = offset + size;
   while (read_ptr < writePointer) {
     heap[write_ptr++] = heap[read_ptr++];
   }
 
+  // adjust any stale pointers in the metadata array
   for (auto &set : metadata) {
     for (auto &meta : set) {
       if (meta.offset >= offset) {
@@ -469,9 +475,11 @@ void SlappCache::evict(const uint64_t set_index, const uint64_t target,
   }
 
   writePointer -= size;
-  DPRINTF(SlappCache, "write Pointer: %x %x\n", writePointer, write_ptr);
+  // DPRINTF(SlappCache, "write Pointer: %x %x\n", writePointer, write_ptr);
   panic_if(writePointer != write_ptr,
            "Write pointers should sync after eviction");
+
+  // clear the current way
   meta.valid = false;
   meta.start = 0;
   meta.end = 0;
@@ -479,8 +487,12 @@ void SlappCache::evict(const uint64_t set_index, const uint64_t target,
 }
 
 void SlappCache::insert(PacketPtr pkt) {
-  // The address should not be in the cache
+  // The address should not be in the cache, we don't
+  // want synonyms
   assert(!accessFunctional(pkt));
+  // this false access functional could cause unecessary evictions,
+  // so clear the queue
+
   // The pkt should be a response
   assert(pkt->isResponse());
 
@@ -504,7 +516,7 @@ void SlappCache::insert(PacketPtr pkt) {
            "Should never evict a block that doesn't exist");
 
   if (metadata[set_index][target].valid) {
-    evict(set_index, target, true);
+    evict(set_index, target);
   }
 
   panic_if((writePointer + pkt->getSize()) > capacity,
@@ -535,18 +547,9 @@ void SlappCache::insert(PacketPtr pkt) {
 
   DPRINTF(SlappCache, "offset: %lx, ptr: %p\n",
           metadata[set_index][target].offset, ptr);
-}
 
-AddrRangeList SlappCache::getAddrRanges() const {
-  DPRINTF(SlappCache, "Sending new ranges\n");
-  // Just use the same ranges as whatever is on the memory side.
-  return memPort.getAddrRanges();
-}
-
-void SlappCache::sendRangeChange() const {
-  for (auto &port : cpuPorts) {
-    port.sendRangeChange();
-  }
+  // process the eviction if needed
+  memPort.process();
 }
 
 SlappCache::SlappCacheStats::SlappCacheStats(statistics::Group *parent)

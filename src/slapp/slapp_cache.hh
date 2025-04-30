@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <queue>
 #include <unordered_map>
 
 #include "base/random.hh"
@@ -59,28 +60,20 @@ private:
     /// The object that owns this object (SlappCache)
     SlappCache *owner;
 
-    /// True if the port needs to send a retry req.
-    bool needRetry;
+    // packet that is outstanding on the response port - set
+    // if the cache tries to reply to the CPU but it is busy
+    std::optional<PacketPtr> outstanding;
 
-    /// If we tried to send a packet and it was blocked, store it here
-    PacketPtr blockedPacket;
+    /// True if the port needs to send a retry req.
+    bool retry;
 
   public:
     /**
      * Constructor. Just calls the superclass constructor.
      */
     CPUSidePort(const std::string &name, int id, SlappCache *owner)
-        : ResponsePort(name), id(id), owner(owner), needRetry(false),
-          blockedPacket(nullptr) {}
-
-    /**
-     * Send a packet across this port. This is called by the owner and
-     * all of the flow control is hanled in this function.
-     * This is a convenience function for the SlappCache to send pkts.
-     *
-     * @param packet to send.
-     */
-    void sendPacket(PacketPtr pkt);
+        : ResponsePort(name), id(id), owner(owner), outstanding(std::nullopt),
+          retry(false) {}
 
     /**
      * Get a list of the non-overlapping address ranges the owner is
@@ -92,8 +85,17 @@ private:
     AddrRangeList getAddrRanges() const override;
 
     /**
+     * Send a packet across this port. This is called by the owner and
+     * all of the flow control is hanled in this function.
+     * This is a convenience function for the SlappCache to send pkts.
+     *
+     * @param packet to send.
+     */
+    void sendPacket(PacketPtr pkt);
+
+    /**
      * Send a retry to the peer port only if it is needed. This is called
-     * from the SlappCache whenever it is unblocked.
+     * from the SimpleCache whenever it is unblocked.
      */
     void trySendRetry();
 
@@ -141,26 +143,41 @@ private:
     /// The object that owns this object (SlappCache)
     SlappCache *owner;
 
-    /// If we tried to send a packet and it was blocked, store it here
-    PacketPtr blockedPacket;
-
   public:
     /**
      * Constructor. Just calls the superclass constructor.
      */
     MemSidePort(const std::string &name, SlappCache *owner)
-        : RequestPort(name), owner(owner), blockedPacket(nullptr) {}
+        : RequestPort(name), owner(owner), outstanding() {}
 
     /**
-     * Send a packet across this port. This is called by the owner and
-     * all of the flow control is hanled in this function.
-     * This is a convenience function for the SlappCache to send pkts.
+     * Processes a packet from the outstanding queue and tries to
+     * send it across the port. This should be run following
+     * flow control rules while outstanding is not empty to
+     * make forward progress.
      *
-     * @param packet to send.
+     * @return true if queue is empty.
      */
-    void sendPacket(PacketPtr pkt);
+    bool process();
+
+    /// Queue of outstanding memory requests (read and write)
+    /// that we need to service the cache request. Because this
+    /// is a blocking cache, the queue is completely filled up
+    /// when the request is made and then slowly consumed asynchronously
+    /// (in order). When the queue is empty, the cache responds
+    /// to the CPU.
+    std::queue<PacketPtr> outstanding;
 
   protected:
+    /**
+     * Called to receive an address range change from the peer response
+     * port. The default implementation ignores the change and does
+     * nothing. Override this function in a derived class if the owner
+     * needs to be aware of the address ranges, e.g. in an
+     * interconnect component like a bus.
+     */
+    void recvRangeChange() override;
+
     /**
      * Receive a timing response from the response port.
      */
@@ -172,15 +189,6 @@ private:
      * port) and was unsuccesful.
      */
     void recvReqRetry() override;
-
-    /**
-     * Called to receive an address range change from the peer response
-     * port. The default implementation ignores the change and does
-     * nothing. Override this function in a derived class if the owner
-     * needs to be aware of the address ranges, e.g. in an
-     * interconnect component like a bus.
-     */
-    void recvRangeChange() override;
   };
 
   struct Meta {
@@ -206,7 +214,7 @@ private:
    * @return true if we can handle the request this cycle, false if the
    *         requestor needs to retry later
    */
-  bool handleRequest(PacketPtr pkt, int port_id);
+  bool handleTimingReq(PacketPtr pkt, int port_id);
 
   /**
    * Handle the respone from the memory side. Called from the memory port
@@ -216,7 +224,7 @@ private:
    * @return true if we can handle the response this cycle, false if the
    *         responder needs to retry later
    */
-  bool handleResponse(PacketPtr pkt);
+  bool handleTimingResp(PacketPtr pkt);
 
   /**
    * Send the packet to the CPU side.
@@ -250,8 +258,7 @@ private:
    */
   bool accessFunctional(PacketPtr pkt);
 
-  void evict(const uint64_t set_index, const uint64_t target,
-             const bool write_back);
+  void evict(const uint64_t set_index, const uint64_t target);
 
   /**
    * Insert a block into the cache. If there is no room left in the cache,
