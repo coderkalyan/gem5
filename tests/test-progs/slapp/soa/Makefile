@@ -1,4 +1,4 @@
-all: aos64-static aos64-dynamic aos32-static soa64-static soa64-dynamic soa32-static
+all: aos64-static aos64-dynamic aos32-static soa64-static soa64-dynamic soa32-static new_aos64-static new_aos64-dynamic new_aos32-static
 
 aos64-static: aos.c dockcross-x64
 	./dockcross-x64 bash -c '$$CC aos.c -o aos64-static -static'
@@ -18,6 +18,14 @@ soa64-dynamic: soa.c dockcross-x64
 soa32-static: soa.c dockcross-x86
 	./dockcross-x86 bash -c '$$CC soa.c -o soa32-static -static'
 
+new_aos64-static: new_aos.c dockcross-x64
+	./dockcross-x64 bash -c '$$CC new_aos.c -o new_aos64-static -static'
+
+new_aos64-dynamic: new_aos.c dockcross-x64
+	./dockcross-x64 bash -c '$$CC new_aos.c -o new_aos64-dynamic'
+
+new_aos32-static: new_aos.c dockcross-x86
+	./dockcross-x86 bash -c '$$CC new_aos.c -o new_aos32-static -static'
 
 dockcross-x64:
 	docker run --rm dockcross/linux-x64 > ./dockcross-x64

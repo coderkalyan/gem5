@@ -13,6 +13,6 @@ class SlappCache(ClockedObject):
 
     latency = Param.Cycles(1, "Cycles taken on a hit or to resolve a miss")
     sets = Param.Unsigned(256, "Number of sets")
-    associativity = Param.Unsigned(4, "Associativity (number of tags per set)")
-    capacity = Param.MemorySize('64kB', "Data capacity of the backing cache store")
+    associativity = Param.Unsigned(8, "Associativity (number of tags per set)")
+    capacity = Param.MemorySize('32kB', "Data capacity of the backing cache store")
     system = Param.System(Parent.any, "The system this cache is part of")
