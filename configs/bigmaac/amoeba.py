@@ -64,6 +64,7 @@ system.mem_ctrl.port = system.membus.mem_side_ports
 #binary = "tests/test-progs/hello/bin/x86/linux/hello"
 # binary = "tests/test-progs/hello/src/hello"
 # binary = "tests/test-progs/slapp/soa/aos"
+binary = "tests/test-progs/slapp/soa/new_aos"
 # binary = "tests/test-progs/slapp/basic/linear64-static"
 # binary = "/usr/bin/python3"
 # script = "tests/test-progs/python/hello.py"
