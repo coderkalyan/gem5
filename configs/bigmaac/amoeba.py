@@ -28,18 +28,18 @@ system.membus = SystemXBar()
 
 system.cpu = X86TimingSimpleCPU()
 # system.cpu = X86O3CPU()
-system.slapp = SlappCache()
-system.slapp.mem_side = system.membus.cpu_side_ports
+# system.slapp = SlappCache()
+# system.slapp.mem_side = system.membus.cpu_side_ports
+# system.cpu.dcache_port = system.slapp.cpu_side
 # system.cpu.icache_port = system.slapp.inst_port
 # system.cpu.dcache_port = system.slapp.data_port
 # system.slapp.mem_side = system.membus.cpu_side_ports
 system.cpu.icache = L1Cache()
 system.cpu.icache.mem_side = system.membus.cpu_side_ports
 system.cpu.icache.cpu_side = system.cpu.icache_port
-system.cpu.dcache_port = system.slapp.cpu_side
-# system.cpu.dcache = L1Cache()
-# system.cpu.dcache.mem_side = system.membus.cpu_side_ports
-# system.cpu.dcache.cpu_side = system.cpu.dcache_port
+system.cpu.dcache = SlappCache()
+system.cpu.dcache.mem_side = system.membus.cpu_side_ports
+system.cpu.dcache.cpu_side = system.cpu.dcache_port
 system.cpu.createInterruptController()
 system.cpu.interrupts[0].pio = system.membus.mem_side_ports
 system.cpu.interrupts[0].int_requestor = system.membus.cpu_side_ports
@@ -53,7 +53,9 @@ system.mem_ctrl.dram.range = system.mem_ranges[0]
 system.mem_ctrl.port = system.membus.mem_side_ports
 
 binary = "tests/test-progs/hello/bin/x86/linux/hello"
+# binary = "tests/test-progs/hello/src/hello"
 # binary = "tests/test-progs/slapp/soa/aos"
+# binary = "tests/test-progs/slapp/basic/linear64-static"
 # binary = "/usr/bin/python3"
 # script = "tests/test-progs/python/hello.py"
 system.workload = SEWorkload.init_compatible(binary)

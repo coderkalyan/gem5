@@ -1,86 +1,117 @@
-/*
- * Copyright (c) 2025 Kalyan Sriram <kgsriram@wisc.edu>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met: redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer;
- * redistributions in binary form must reproduce the above copyright
- * notice, this list of conditions and the following disclaimer in the
- * documentation and/or other materials provided with the distribution;
- * neither the name of the copyright holders nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
 
-#define NUM_PERSONS 61440 // 1000000
+#define NUM_PERSONS 61440
 
-// Struct of size 155 bytes (not a multiple of 64 and greater than 128)
+// Struct size: 160 bytes, all fields naturally aligned
 typedef struct {
-    int id;            // 4 bytes
-    char name[64];     // 64 bytes
-    double height;     // 8 bytes
-    double weight;     // 8 bytes
-    char address[70];  // 70 bytes
-    unsigned char age; // 1 byte
-    // Total = 4 + 64 + 8 + 8 + 70 + 1 = 155 bytes
+  int id;        // 4 bytes
+  char _pad1[4]; // Padding to align next field
+
+  char name[64]; // 64 bytes
+
+  double height; // 8 bytes
+  double weight; // 8 bytes
+
+  char address[70]; // 70 bytes
+  char _pad2[6];    // Padding to align age
+
+  unsigned char age; // 1 byte
+  char _pad3[7];     // Padding to align struct size to 160
 } Person;
 
-void generate_random_data(Person *people, size_t count) {
-    for (size_t i = 0; i < count; ++i) {
-        people[i].id = rand();
-        snprintf(people[i].name, sizeof(people[i].name), "Person_%zu", i);
-        people[i].height = (double) (rand() % 50 + 150); // Height in cm
-        people[i].weight = (double) (rand() % 50 + 50);  // Weight in kg
-        snprintf(people[i].address, sizeof(people[i].address),
-                 "Address_%zu_Somewhere", i);
-        people[i].age = (unsigned char) (rand() % 100);
-    }
+// Simple PRNG: Linear Congruential Generator
+static unsigned int prng_state = 1;
+
+unsigned int prng_next(void) {
+  prng_state = prng_state * 1664525u + 1013904223u;
+  return prng_state;
 }
 
-double compute_mean_age(const Person *people, size_t count) {
-    unsigned long long sum = 0;
-    for (size_t i = 0; i < count; ++i) {
-        sum += people[i].age;
+// Integer to ASCII string (no formatting), null-terminated
+void uint_to_str(unsigned int value, char *buffer, int max_len) {
+  int i = max_len - 2;
+  buffer[max_len - 1] = '\0';
+  if (value == 0) {
+    buffer[i--] = '0';
+  } else {
+    while (value > 0 && i >= 0) {
+      buffer[i--] = '0' + (value % 10);
+      value /= 10;
     }
-    return (double) sum / count;
+  }
+  // Shift result to start of buffer
+  int j = 0;
+  ++i;
+  while (i < max_len - 1) {
+    buffer[j++] = buffer[i++];
+  }
+  buffer[j] = '\0';
 }
 
-int main() {
-    srand((unsigned int) time(NULL));
+void generate_random_data(Person *people, unsigned int count) {
+  for (unsigned int i = 0; i < count; ++i) {
+    people[i].id = (int)prng_next();
 
-    Person *people = (Person *) malloc(NUM_PERSONS * sizeof(Person));
-    if (people == NULL) {
-        fprintf(stderr, "Memory allocation failed.\n");
-        return 1;
+    // name = "Person_" + i
+    char num_buf[20];
+    uint_to_str(i, num_buf, sizeof(num_buf));
+    char *prefix = "Person_";
+    int j = 0, k = 0;
+    while (prefix[j] != '\0' && j < 63) {
+      people[i].name[j] = prefix[j];
+      ++j;
     }
-
-    generate_random_data(people, NUM_PERSONS);
-
-    double mean_age;
-    for (int i = 0; i < 100; i++) {
-        mean_age = compute_mean_age(people, NUM_PERSONS);
+    while (num_buf[k] != '\0' && j < 63) {
+      people[i].name[j++] = num_buf[k++];
     }
-    printf("Mean age: %.2f\n", mean_age);
+    people[i].name[j] = '\0';
 
-    free(people);
-    return 0;
+    people[i].height = (double)(prng_next() % 50 + 150);
+    people[i].weight = (double)(prng_next() % 50 + 50);
+
+    // address = "Address_" + i + "_Somewhere"
+    prefix = "Address_";
+    j = 0;
+    k = 0;
+    while (prefix[j] != '\0' && j < 69) {
+      people[i].address[j] = prefix[j];
+      ++j;
+    }
+    uint_to_str(i, num_buf, sizeof(num_buf));
+    while (num_buf[k] != '\0' && j < 69) {
+      people[i].address[j++] = num_buf[k++];
+    }
+    prefix = "_Somewhere";
+    k = 0;
+    while (prefix[k] != '\0' && j < 69) {
+      people[i].address[j++] = prefix[k++];
+    }
+    people[i].address[j] = '\0';
+
+    people[i].age = (unsigned char)(prng_next() % 100);
+  }
+}
+
+double compute_mean_age(const Person *people, unsigned int count) {
+  unsigned long long sum = 0;
+  for (unsigned int i = 0; i < count; ++i) {
+    sum += people[i].age;
+  }
+  return (double)sum / count;
+}
+
+int main(void) {
+  // Static allocation to avoid malloc
+  static Person people[NUM_PERSONS];
+
+  generate_random_data(people, NUM_PERSONS);
+
+  double mean_age = 0.0;
+  for (int i = 0; i < 100; ++i) {
+    mean_age = compute_mean_age(people, NUM_PERSONS);
+  }
+
+  printf("Mean age: %.2f\n", mean_age);
+
+  return 0;
 }
