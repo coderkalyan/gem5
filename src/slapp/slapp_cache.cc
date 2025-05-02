@@ -174,7 +174,8 @@ bool SlappCache::MemSidePort::process() {
   const auto &pkt = outstanding.front();
   const auto sent = sendTimingReq(pkt);
   if (sent) {
-    DPRINTF(SlappCache, "Successfully sent pkt %s from queue\n", pkt->print());
+    DPRINTF(SlappCache, "Successfully sent pkt %x %s from queue\n", pkt,
+            pkt->print());
     outstanding.pop();
   } else {
     DPRINTF(SlappCache, "Memory request port busy\n");
@@ -196,11 +197,15 @@ bool SlappCache::MemSidePort::recvTimingResp(PacketPtr pkt) {
     return owner->handleTimingResp(pkt);
   } else {
     panic_if(!pkt->isWrite(), "Expected memory response to be write");
-    DPRINTF(SlappCache, "Received resposne to write request %s. Sending next\n",
+    DPRINTF(SlappCache, "Received response to write request %s. Sending next\n",
             pkt->print());
     // FIXME: is it correct to send another packet or
     // do we need to acknowledge first?
-    return process();
+    owner->schedule(new EventFunctionWrapper([this] { process(); },
+                                             name() + ".processEvent", true),
+                    owner->clockEdge(Cycles(1)));
+    return true;
+    // return process();
   }
 }
 
@@ -240,10 +245,10 @@ bool SlappCache::handleTimingReq(PacketPtr pkt, int port_id) {
   waitingPortId = port_id;
 
   // Schedule an event after cache access latency to actually access
-  accessTiming(pkt);
-  // schedule(new EventFunctionWrapper([this, pkt] { accessTiming(pkt); },
-  //                                   name() + ".accessEvent", true),
-  //          clockEdge(latency));
+  // accessTiming(pkt);
+  schedule(new EventFunctionWrapper([this, pkt] { accessTiming(pkt); },
+                                    name() + ".accessEvent", true),
+           clockEdge(latency));
 
   return true;
 }
@@ -275,9 +280,17 @@ bool SlappCache::handleTimingResp(PacketPtr pkt) {
 
     // We had to upgrade a previous packet. We can functionally deal with
     // the cache access now. It better be a hit since we inserted.
+    DPRINTF(SlappCache, "Original packet: %s\n", originalPacket->print());
     const bool hit = accessFunctional(originalPacket);
-    panic_if(!hit, "Expected hit after inserting packet");
+    if (!hit) {
+      DPRINTF(SlappCache,
+              "Expected hit after inserting packet: inserted %s original %s\n",
+              pkt->print(), originalPacket->print());
+      panic("Expected hit after inserting packet");
+    }
 
+    DPRINTF(SlappCache, "Making response: %x %s\n", originalPacket,
+            originalPacket->print());
     originalPacket->makeResponse();
     // delete pkt;
     pkt = originalPacket;
@@ -316,7 +329,7 @@ void SlappCache::sendResponse(PacketPtr pkt) {
 }
 
 void SlappCache::handleFunctional(PacketPtr pkt) {
-  DPRINTF(SlappCache, "Handling functional request for %s\n", pkt->print());
+  // DPRINTF(SlappCache, "Handling functional request for %s\n", pkt->print());
   const auto hit = accessFunctional(pkt);
   if (hit) {
     assert(memPort.outstanding.empty());
@@ -363,7 +376,8 @@ void SlappCache::accessTiming(PacketPtr pkt) {
     assert(size <= 8);
 
     // FIXME: implement prefetching
-    size = 8;
+    size += address - (address & ~7);
+    size = ((size + 7) / 8) * 8;
     address = address & ~7;
     DPRINTF(SlappCache, "Miss for packet %s, upgrading to address %x size %d\n",
             pkt->print(), address, size);
@@ -382,10 +396,12 @@ void SlappCache::accessTiming(PacketPtr pkt) {
 
     // Create a new packet that is blockSize
     PacketPtr new_pkt = new Packet(pkt->req, cmd, size);
-    new_pkt->cmd = new_pkt->makeReadCmd(pkt->req);
+    new_pkt->setAddr(address);
     new_pkt->allocate();
 
     // Should now be block aligned
+    DPRINTF(SlappCache, "Aligned address: %x %x\n", new_pkt->getAddr(),
+            address);
     assert(new_pkt->getAddr() == address);
 
     // Save the old packet
@@ -400,7 +416,6 @@ void SlappCache::accessTiming(PacketPtr pkt) {
 }
 
 bool SlappCache::accessFunctional(PacketPtr pkt) {
-  DPRINTF(SlappCache, "Accessing functional: %s\n", pkt->print());
   const auto address = pkt->getAddr();
   const auto upper_bits = (uint64_t)(address) >> 6; // remove byte offset
   const auto set_index = upper_bits & (sets - 1);
@@ -454,6 +469,10 @@ bool SlappCache::accessFunctional(PacketPtr pkt) {
   }
 
   // miss, possibly partial
+  if (!memPort.outstanding.empty()) {
+    const auto &pkt = memPort.outstanding.front();
+    DPRINTF(SlappCache, "Miss: outstanding %x %s\n", pkt, pkt->print());
+  }
   return false;
 }
 
